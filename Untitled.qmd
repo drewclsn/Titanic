@@ -1,0 +1,116 @@
+---
+title: "Spaceship Titanic survivorship"
+author: "Drew Clayson"
+format: html
+editor: visual
+---
+
+## Introduction
+
+Welcome to the year 2912, where your data science skills are needed to solve a cosmic mystery. We've received a transmission from four lightyears away and things aren't looking good.
+
+The *Spaceship Titanic* was an interstellar passenger liner launched a month ago. With almost 13,000 passengers on board, the vessel set out on its maiden voyage transporting emigrants from our solar system to three newly habitable exoplanets orbiting nearby stars.
+
+While rounding Alpha Centauri en route to its first destination---the torrid 55 Cancri E---the unwary *Spaceship Titanic* collided with a spacetime anomaly hidden within a dust cloud. Sadly, it met a similar fate as its namesake from 1000 years before. Though the ship stayed intact, almost half of the passengers were transported to an alternate dimension!
+
+To help rescue crews and retrieve the lost passengers, you are challenged to predict which passengers were transported by the anomaly using records recovered from the spaceship's damaged computer system.
+
+## Initial imports
+
+I need to load all necessary libraries
+
+```{r}
+
+library(GGally) # pairs plots
+library(gam) # gam models
+library(leaps) # regression subsets
+library(tree) # trees
+library(randomForest) # random forest
+library(gbm) # boosting
+library(glmnet) # Ridge/lasso
+library(ISLR)
+library(tidyverse)
+```
+
+I will begin by importing all the necessary information and creating a validation set from the training set because I want to get the model right the first submission rather than much later. I will of course submit one of each type to see which model performs the best.
+
+```{r}
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+train[,c(3,7,14)] <- 1 * (train[,c(3,7,14)] == "True")
+train <- train %>% mutate_at(vars(CryoSleep, VIP, Transported), factor)
+CabinYes <- train$Cabin != ""
+SplitMat <- matrix(unlist(strsplit(train$Cabin, split = "/")),ncol=3,byrow=T)
+train[c('Deck','Num','Side')] <- ""
+train[c('Deck','Num','Side')][CabinYes,] <- SplitMat[,1:3]
+train <- train[-c(1, 4, 13)]
+train$Destination <- as.factor(train$Destination)
+train$HomePlanet <- as.factor(train$HomePlanet)
+```
+
+## Visualization
+
+I must begin the analysis by performing some visualization of the data
+
+```{r}
+
+
+```
+
+## Ridge Regression
+
+I will begin by performing multiple elastic nets. Ridge regression comes when $\alpha = 0$ and LASSO regression comes from $\alpha = 1$. An elastic net can result in $\alpha$ between 0 and 1. To find values of $\alpha$ I need to generate fold ids.
+
+```{r}
+keep <- complete.cases(train)
+train.glmnet <- train[keep, ]
+X <- model.matrix(Transported ~ ., data = train.glmnet)
+Transported <- train$Transported[keep]
+Foldid <- sample(1:10, dim(X)[1], replace = TRUE)
+RidgeOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 0, nlambda = 200, foldid = Foldid)
+ldm <- RidgeOut$lambda.min
+plot(RidgeOut)
+RidgeOutFinal <- glmnet(x = X, y = Transported, family = "binomial", alpha = 0, lambda = ldm)
+
+```
+
+## LASSO regression
+
+```{r}
+LassoOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 1, nlambda = 200, foldid = Foldid)
+plot(LassoOut)
+ldm <- LassoOut$lambda.min
+
+
+```
+
+## Elastic Net
+
+```{r}
+CV <- data.frame(Alphas = seq(0.1,0.9, by = 0.1), LambdaMin = NA)
+j <- 1
+par(mfrow = c(3,3))
+for (i in CV$Alphas){
+  eNetOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = CV$Alphas[j], nlambda = 200, foldid = Foldid)
+  plot(eNetOut)
+  CV$LambdaMin[j] <- eNetOut$lambda.min
+  j <- j + 1
+}
+
+j <- 1
+CV$Dev <- NA
+for (i in CV$Alphas){
+  eNetOut2 <- glmnet(x = X, y = Transported,family = "binomial", alpha = CV$Alphas[j], lambda = CV$LambdaMin[j], foldid = Foldid)
+  CV$Dev[j] <- deviance(eNetOut2)
+  j <- j + 1
+}
+```
+
+## Trees
+
+```{r}
+n <- dim(train)[1]
+tr_index <- sample(1:n, size = 7000, replace = F)
+train_x <- train[tr_index, ]
+val_x <- train[-tr_index, ]
+```
