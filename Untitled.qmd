@@ -20,7 +20,6 @@ To help rescue crews and retrieve the lost passengers, you are challenged to pre
 I need to load all necessary libraries
 
 ```{r}
-
 library(GGally) # pairs plots
 library(gam) # gam models
 library(leaps) # regression subsets
@@ -30,6 +29,8 @@ library(gbm) # boosting
 library(glmnet) # Ridge/lasso
 library(ISLR)
 library(tidyverse)
+library(naniar)
+library(missForest)
 ```
 
 I will begin by importing all the necessary information and creating a validation set from the training set because I want to get the model right the first submission rather than much later. I will of course submit one of each type to see which model performs the best.
@@ -38,79 +39,134 @@ I will begin by importing all the necessary information and creating a validatio
 train <- read.csv("train.csv")
 test <- read.csv("test.csv")
 train[,c(3,7,14)] <- 1 * (train[,c(3,7,14)] == "True")
-train <- train %>% mutate_at(vars(CryoSleep, VIP, Transported), factor)
 CabinYes <- train$Cabin != ""
 SplitMat <- matrix(unlist(strsplit(train$Cabin, split = "/")),ncol=3,byrow=T)
 train[c('Deck','Num','Side')] <- ""
 train[c('Deck','Num','Side')][CabinYes,] <- SplitMat[,1:3]
 train <- train[-c(1, 4, 13)]
-train$Destination <- as.factor(train$Destination)
-train$HomePlanet <- as.factor(train$HomePlanet)
+train <- train %>% replace_with_na_all(condition = ~.x == "")
+train <- train %>% mutate_at(vars(CryoSleep, VIP, Destination, HomePlanet, Deck, Side), factor)
+train$Num <- as.numeric(train$Num)
+Fixed_Train <- missForest(train)
+Filledtrain <- Fixed_Train$ximp
+
+# Adjust Test Set Data
+
+test[,c(3,7)] <- 1 * (train[,c(3,7)] == "True")
+CabinYes <- test$Cabin != ""
+SplitMat <- matrix(unlist(strsplit(test$Cabin, split = "/")),ncol=3,byrow=T)
+test[c('Deck','Num','Side')] <- ""
+test[c('Deck','Num','Side')][CabinYes,] <- SplitMat[,1:3]
+test <- test[-c(1, 4, 13)]
+test <- test %>% mutate_at(vars(CryoSleep, VIP, Destination, HomePlanet, Deck, Side), factor)
+test$Num <- as.numeric(test$Num)
+Fixed_Test <- missForest(test)
+Filledtest <- Fixed_Test$ximp
+
 ```
 
-## Visualization
+# Imputation of missing values
+
+# Visualization and Summary
 
 I must begin the analysis by performing some visualization of the data
 
 ```{r}
-
-
+Filledtrain %>% group_by(VIP) %>% summarise(sum(Transported == 1) / n())
+Filledtrain %>% group_by(HomePlanet) %>% summarise(sum(Transported == 1) / n())
+Filledtrain %>% group_by(CryoSleep) %>% summarise(sum(Transported == 1) / n())
+Filledtrain %>% group_by(Side) %>% summarise(sum(Transported == 1) / n())
+Filledtrain %>% group_by(Deck) %>% summarise(sum(Transported == 1) / n())
+ggplot(data = Filledtrain, mapping = aes(x = RoomService,y = FoodCourt, color = Transported)) +
+  geom_point()
 ```
+
+VIPs had a lower probability of being transported. Earthlings had a lower probability and Europans had a higher one. Tose in cryosleep had a much higher probability of being transported. Those on the starboard side were more likely to be transported as well as those on decks b and C.
+
+# Elastic Nets
 
 ## Ridge Regression
 
 I will begin by performing multiple elastic nets. Ridge regression comes when $\alpha = 0$ and LASSO regression comes from $\alpha = 1$. An elastic net can result in $\alpha$ between 0 and 1. To find values of $\alpha$ I need to generate fold ids.
 
 ```{r}
-keep <- complete.cases(train)
-train.glmnet <- train[keep, ]
-X <- model.matrix(Transported ~ ., data = train.glmnet)
-Transported <- train$Transported[keep]
+X <- model.matrix(Transported ~ ., data = Filledtrain)
+Transported <- Filledtrain$Transported[keep]
 Foldid <- sample(1:10, dim(X)[1], replace = TRUE)
-RidgeOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 0, nlambda = 200, foldid = Foldid)
-ldm <- RidgeOut$lambda.min
+lambdas <- 10^(seq( -6,2, by = 0.1))
+RidgeOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 0, lambda = lambdas, foldid = Foldid)
+RidgeDev <- deviance(RidgeOut$glmnet.fit)[RidgeOut$glmnet.fit$lambda == RidgeOut$lambda.min]
 plot(RidgeOut)
-RidgeOutFinal <- glmnet(x = X, y = Transported, family = "binomial", alpha = 0, lambda = ldm)
-
 ```
 
 ## LASSO regression
 
 ```{r}
-LassoOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 1, nlambda = 200, foldid = Foldid)
+
+LassoOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = 1, lambda = lambdas, foldid = Foldid)
+LassoDev <- deviance(LassoOut$glmnet.fit)[which(LassoOut$glmnet.fit$lambda == LassoOut$lambda.min)]
 plot(LassoOut)
-ldm <- LassoOut$lambda.min
 
 
 ```
 
 ## Elastic Net
 
+This will include lasso and ridge models to more easily compare the deviances of each model
+
 ```{r}
-CV <- data.frame(Alphas = seq(0.1,0.9, by = 0.1), LambdaMin = NA)
+CV <- data.frame(Alphas = seq(0,1, by = 0.1), LambdaMin = NA, Deviance = NA)
 j <- 1
 par(mfrow = c(3,3))
 for (i in CV$Alphas){
-  eNetOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = CV$Alphas[j], nlambda = 200, foldid = Foldid)
-  plot(eNetOut)
+  eNetOut <- cv.glmnet(x = X, y = Transported,family = "binomial", alpha = i, lambda = lambdas, foldid = Foldid)
   CV$LambdaMin[j] <- eNetOut$lambda.min
-  j <- j + 1
+  CV$Deviance[j] <- deviance(eNetOut$glmnet.fit)[which(eNetOut$glmnet.fit$lambda == eNetOut$lambda.min)]
+  j <- j+1
 }
 
-j <- 1
-CV$Dev <- NA
-for (i in CV$Alphas){
-  eNetOut2 <- glmnet(x = X, y = Transported,family = "binomial", alpha = CV$Alphas[j], lambda = CV$LambdaMin[j], foldid = Foldid)
-  CV$Dev[j] <- deviance(eNetOut2)
-  j <- j + 1
-}
 ```
 
-## Trees
+# Trees
+
+## Single Tree
 
 ```{r}
-n <- dim(train)[1]
+n <- dim(Filledtrain)[1]
 tr_index <- sample(1:n, size = 7000, replace = F)
-train_x <- train[tr_index, ]
-val_x <- train[-tr_index, ]
+train_x <- Filledtrain[tr_index, ]
+val_x <- Filledtrain[-tr_index, ]
+
+dtree <- tree(Transported ~ ., data = train_x, split = "deviance")
+summary(dtree)
+plot(dtree, type = "uniform")
+text(dtree, pretty = 0, cex = 0.3)
+
+preds <- predict(dtree, val_x, type = "class")
+mean(preds == val_x$Transported)
+```
+
+## Boosting
+
+```{r}
+train_x2 <- train_x
+train_x2$Transported <- train_x2$Transported == 1
+gbmOut <- gbm(Transported ~ ., distribution = "bernoulli", n.trees = 1000,
+              interaction.depth = 1, data = train_x2, shrinkage = 0.01)
+phats <- predict(gbmOut, val_x, type = "response")
+preds <- (phats > 0.5) * 1
+mean(preds == val_x$Transported)
+```
+
+## Random Forest and Bagging
+
+```{r}
+p <- dim(train_x)[2] - 1
+baggedTrees <- randomForest(Transported ~ ., mtry = p, data = train_x)
+preds <- predict(baggedTrees, val_x, type = "response")
+mean(preds == val_x$Transported)
+
+rfTrees <- randomForest(Transported ~ ., mtry = 4, data = train_x)
+preds <- predict(rfTrees, val_x, type = "response")
+mean(preds == val_x$Transported)
 ```
